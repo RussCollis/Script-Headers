@@ -668,49 +668,82 @@ private struct NumberedCodeView: View {
 
     private static let monoFont: Font = .system(size: 11.5, weight: .regular, design: .monospaced)
 
+    /// Lines per rendered block. A single `Text` taller than the GPU's maximum texture size
+    /// (~16k px) silently draws nothing, so large scripts are split into blocks that each stay
+    /// well under that limit (200 lines ≈ 3,400 pt) and are created lazily as they scroll in.
+    private static let chunkSize = 200
+
+    /// One block of consecutive lines: its first line index, gutter numbers and styled content.
+    private struct Chunk: Identifiable {
+        let id: Int
+        let gutter: String
+        let content: AttributedString
+    }
+
     var body: some View {
         let lines = text.components(separatedBy: "\n")
         let totalLines = max(1, lines.count)
         let gutterDigits = max(3, String(totalLines).count)
         let gutterWidth = CGFloat(gutterDigits * 8 + 14)
-        let gutterString = (1...totalLines).map(String.init).joined(separator: "\n")
-        let attributed = isMarkdown ? attributedMarkdown(for: text) : attributedScript(for: text, headerLineCount: headerLineCount, commentLines: commentLines)
+        let chunks = makeChunks(lines)
 
         ScrollView([.vertical, .horizontal]) {
-            HStack(alignment: .top, spacing: 0) {
-                // Line numbers gutter
-                Text(gutterString)
-                    .font(Self.monoFont)
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.trailing)
-                    .lineSpacing(3)
-                    .frame(width: gutterWidth, alignment: .trailing)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 8)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(chunks) { chunk in
+                    let isFirst = chunk.id == 0
+                    let isLast = chunk.id == chunks.last?.id
+                    HStack(alignment: .top, spacing: 0) {
+                        // Line numbers gutter
+                        Text(chunk.gutter)
+                            .font(Self.monoFont)
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.trailing)
+                            .lineSpacing(3)
+                            .frame(width: gutterWidth, alignment: .trailing)
+                            .padding(.horizontal, 6)
+                            .padding(.top, isFirst ? 8 : 0)
+                            .padding(.bottom, isLast ? 8 : 3)
+                            .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
 
-                Rectangle()
-                    .fill(Color(nsColor: .separatorColor).opacity(0.5))
-                    .frame(width: 1)
+                        Rectangle()
+                            .fill(Color(nsColor: .separatorColor).opacity(0.5))
+                            .frame(width: 1)
 
-                // Code or Markdown content
-                Text(attributed)
-                    .font(Self.monoFont)
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+                        // Code or Markdown content
+                        Text(chunk.content)
+                            .font(Self.monoFont)
+                            .lineSpacing(3)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 10)
+                            .padding(.top, isFirst ? 8 : 0)
+                            .padding(.bottom, isLast ? 8 : 3)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                }
             }
-            .fixedSize(horizontal: true, vertical: false)
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private func attributedScript(for text: String, headerLineCount: Int, commentLines: Set<Int>) -> AttributedString {
-        let lines = text.components(separatedBy: "\n")
+    /// Splits the lines into `chunkSize` blocks, styling each with its global line indices so
+    /// header and comment colouring still line up with the whole-file line numbers.
+    private func makeChunks(_ lines: [String]) -> [Chunk] {
+        stride(from: 0, to: max(1, lines.count), by: Self.chunkSize).map { start in
+            let end = min(start + Self.chunkSize, lines.count)
+            let slice = start < end ? Array(lines[start..<end]) : [""]
+            let gutter = (start + 1...start + slice.count).map(String.init).joined(separator: "\n")
+            let content = isMarkdown
+                ? attributedMarkdown(for: slice.joined(separator: "\n"))
+                : attributedScript(for: slice, startIndex: start)
+            return Chunk(id: start, gutter: gutter, content: content)
+        }
+    }
+
+    private func attributedScript(for lines: [String], startIndex: Int) -> AttributedString {
         var result = AttributedString()
-        for (index, line) in lines.enumerated() {
+        for (offset, line) in lines.enumerated() {
+            let index = startIndex + offset
             var str = AttributedString(line)
             if index < headerLineCount {
                 str.foregroundColor = .systemBlue
@@ -720,7 +753,7 @@ private struct NumberedCodeView: View {
                 str.foregroundColor = .primary
             }
             result += str
-            if index < lines.count - 1 {
+            if offset < lines.count - 1 {
                 result += AttributedString("\n")
             }
         }

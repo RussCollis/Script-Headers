@@ -4,7 +4,7 @@
 
 A native macOS SwiftUI app for Jamf Pro admins that adds a standard header to any **Jamf Pro script** or **extension attribute**. It reads the code to fill in the header, so a reader can see what the script does, how it's deployed, what it needs and what has changed without reading the code.
 
-The current version is **1.0.71 (build 71)**
+The current version is **1.0.76 (build 76)**
 
 ## ✨ Features
 
