@@ -49,7 +49,7 @@ struct JamfItem: Identifiable, Hashable {
     var id: String { "\(kind.rawValue)-\(jamfID)" }
 }
 
-/// Whether a script in Jamf Pro already has an Info Headers (house format) header.
+/// Whether a script in Jamf Pro already has an Script Scribe (house format) header.
 enum HeaderStatus: Hashable {
     case unchecked
     case noHeader
@@ -80,6 +80,18 @@ struct JamfSource: Hashable {
     let instanceID: JamfInstance.ID
     let instanceName: String
     let item: JamfItem
+    var serverURL: String = ""
+
+    var webURL: URL? {
+        let trimmed = serverURL.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let base = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        let path = item.kind == .script
+            ? "view/settings/computer-management/scripts/\(item.jamfID)?tab=script"
+            : "view/settings/computer-management/extension-attributes/\(item.jamfID)"
+        guard let baseURL = URL(string: base.hasSuffix("/") ? base : base + "/") else { return nil }
+        return URL(string: path, relativeTo: baseURL)?.absoluteURL
+    }
 }
 
 /// A script or extension attribute read from Jamf Pro, with the details useful for its header.
@@ -332,6 +344,7 @@ final class JamfModel {
         static let instances = "jamfInstances"
         static let selected = "jamfSelectedInstance"
         static let pushes = "jamfPushes"
+        static let downloads = "jamfDownloads"
     }
 
     /// When each item was last updated from this Mac, keyed by instance ID then item ID.
@@ -340,10 +353,27 @@ final class JamfModel {
         set { UserDefaults.standard.set(newValue, forKey: Keys.pushes) }
     }
 
-    /// When an item was last updated in Jamf Pro with Info Headers on this Mac.
+    /// When an item was last updated in Jamf Pro with Script Scribe on this Mac.
     func lastPushed(_ item: JamfItem) -> Date? {
         guard let instance = client?.instanceID.uuidString else { return nil }
         return pushes[instance]?[item.id]
+    }
+
+    /// When each item's script and README were last downloaded on this Mac, keyed by instance ID then item ID.
+    /// Stored (not computed) so the Jamf browser redraws as soon as a download is recorded.
+    private var downloads = UserDefaults.standard.dictionary(forKey: Keys.downloads) as? [String: [String: Date]] ?? [:] {
+        didSet { UserDefaults.standard.set(downloads, forKey: Keys.downloads) }
+    }
+
+    /// When an item's script and README were last downloaded with Script Scribe on this Mac.
+    func lastDownloaded(_ item: JamfItem) -> Date? {
+        guard let instance = client?.instanceID.uuidString else { return nil }
+        return downloads[instance]?[item.id]
+    }
+
+    /// Records that the script and README for `source` were just downloaded.
+    func recordDownload(of source: JamfSource) {
+        downloads[source.instanceID.uuidString, default: [:]][source.item.id] = .now
     }
 
     init() {
@@ -521,6 +551,7 @@ final class JamfModel {
 
 /// Stores the API client secret in the login keychain rather than in preferences.
 enum Keychain {
+    /// Keeps the app's old name so Jamf Pro logins saved before the rename are still found.
     private static let service = "Info Headers – Jamf Pro"
 
     static func read(_ account: String) -> String? {

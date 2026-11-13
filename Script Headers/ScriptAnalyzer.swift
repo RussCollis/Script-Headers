@@ -8,11 +8,15 @@ struct ScriptAnalysis {
     var parameters: [HeaderRow] = []
     var sections: [HeaderRow] = []
     var outputs: [String] = []
+    var results: [String] = []
     var requiredBinaries: [String] = []
     var optionalBinaries: [String] = []
     var usesConsoleUser = false
     var checksForRoot = false
     var reportsResult = false
+    var settings: [HeaderRow] = []
+    var usesEval = false
+    var labelCount = 0
 }
 
 enum ScriptAnalyzer {
@@ -33,8 +37,15 @@ enum ScriptAnalyzer {
         analysis.parameters = parameters(code, language: language)
         analysis.sections = sections(lines, language: language)
         analysis.outputs = outputs(codeText, variables: variables)
+        analysis.results = results(code, variables: allAssignments(in: code))
         // Paths held in variables are resolved, so `[[ -f "$BINARY_PATH" ]]` is seen as a check for the tool.
         (analysis.requiredBinaries, analysis.optionalBinaries) = binaries(resolve(codeText, variables), language: language)
+        analysis.settings = settings(in: lines, language: language)
+        analysis.usesEval = codeText.firstMatch(#"(?:^|[\s;&|])eval\s+"#) != nil
+        let caseLabels = codeText.allMatches(#"^\s*([a-z0-9_.-]+)\)\s*$"#, options: [.anchorsMatchLines])
+        if caseLabels.count > 10 {
+            analysis.labelCount = caseLabels.count
+        }
         return analysis
     }
 
@@ -52,7 +63,7 @@ enum ScriptAnalyzer {
     private static func assignments(in code: [String]) -> [String: String] {
         var values: [String: String] = [:]
         for line in code {
-            if let parts = line.firstMatch(#"^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_]\w*)=["']?([^"'\s;`]+)["']?\s*(?:#.*)?$"#) {
+            if let parts = line.firstMatch(#"^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_]\w*)=["']?([^"' \s;`]+)["']?\s*(?:#.*)?$"#) {
                 values[parts[1]] = parts[2]
             }
         }
@@ -77,22 +88,55 @@ enum ScriptAnalyzer {
         case .javaScript: #"\bprocess\.exit\(\s*(\d+)\s*\)"#
         default: #"(?:^|[\s;&|{(])exit\s+(\d+)\b"#
         }
-        var meanings: [Int: String] = [:]
+        // Each code can be used for several different failures, so every distinct reason is kept, in order.
+        var reasons: [Int: [String]] = [:]
         for (index, line) in lines.enumerated() {
             let trimmed = line.trimmed
             if language.lineCommentPrefixes.contains(where: { trimmed.hasPrefix($0) }) { continue }
             for match in line.allMatches(pattern) {
-                guard let code = Int(match[1]), meanings[code] == nil || meanings[code] == genericFailure else { continue }
-                meanings[code] = code == 0 ? "Success" : reason(for: index, in: lines) ?? genericFailure
+                guard let code = Int(match[1]) else { continue }
+                let reason = code == 0 ? "Success" : exitReason(at: index, in: lines, language: language) ?? genericFailure
+                if !(reasons[code] ?? []).contains(reason) { reasons[code, default: []].append(reason) }
             }
         }
-        meanings[0] = meanings[0] ?? "Success"
+        var meanings: [Int: String] = [:]
+        for (code, list) in reasons {
+            // A generic "Error" only stays when nothing better explains the code.
+            let known = list.filter { $0 != genericFailure }
+            meanings[code] = known.isEmpty ? genericFailure : known.joined(separator: "; ")
+        }
+        // 0 is only listed for scripts that call exit at all; a script that just ends needs no table.
+        if !meanings.isEmpty { meanings[0] = meanings[0] ?? "Success" }
         let rows = meanings.keys.sorted().map { HeaderRow(key: String($0), value: meanings[$0] ?? "") }
         let unexplained = rows.filter { $0.value == genericFailure }.map(\.key)
         return (rows, unexplained)
     }
 
     /// The message printed or the comment written just before an `exit`, used as its meaning.
+    /// Why the exit on line `index` happens: a comment or message next to it, or the function it is in when
+    /// that function shows usage or help text. Nil when nothing nearby says.
+    static func exitReason(at index: Int, in lines: [String], language: ScriptLanguage) -> String? {
+        if let reason = reason(for: index, in: lines) { return reason }
+        if let function = enclosingFunction(of: index, in: lines, language: language),
+           function.firstMatch(#"(?i)^(?:show_?)?(?:usage|help)$"#) != nil {
+            return "Usage text shown (help requested)"
+        }
+        return nil
+    }
+
+    /// The name of the shell function that line `index` is inside, if any. A function ends at a `}` in
+    /// the first column, so code after it is at the top level again.
+    private static func enclosingFunction(of index: Int, in lines: [String], language: ScriptLanguage) -> String? {
+        guard language.isShell else { return nil }
+        for line in lines[..<index].reversed() {
+            if line.hasPrefix("}") { return nil }
+            if let parts = line.firstMatch(#"^(?:function\s+([A-Za-z_][\w:.-]*)|([A-Za-z_][\w:.-]*)\s*\(\s*\))"#) {
+                return parts[1].isEmpty ? parts[2] : parts[1]
+            }
+        }
+        return nil
+    }
+
     private static func reason(for index: Int, in lines: [String]) -> String? {
         if let comment = lines[index].firstMatch(#"exit\s+\d+\s*;?\s*#\s*(.+)$"#)?[1] {
             return clean(comment)
@@ -102,6 +146,8 @@ enum ScriptAnalyzer {
         for offset in 0...3 where index - offset >= 0 {
             let line = lines[index - offset]
             if offset > 0, line.firstMatch(#"(?:^|[\s;])exit\s+\d+"#) != nil { break }
+            // A heredoc's closing word (e.g. EOF) means the lines above are its text, not messages.
+            if offset > 0, line.firstMatch(#"^[A-Z_]+$"#) != nil { break }
             if let text = line.allMatches(message, options: [.caseInsensitive]).last?[1], let cleaned = clean(text) {
                 return cleaned
             }
@@ -109,16 +155,66 @@ enum ScriptAnalyzer {
         return nil
     }
 
-    private static func clean(_ text: String) -> String? {
+    static func clean(_ text: String) -> String? {
         var result = text
-            .replacingOccurrences(of: #"^\s*(?:\[?(?:ERROR|FATAL|WARN(?:ING)?|FAIL(?:ED)?)\]?\s*[:\-–]?\s*)"#, with: "",
+            .replacingOccurrences(of: #"^\s*(?:\[?(?:ERROR|FATAL|WARN(?:ING)?|FAIL(?:ED)?)?\]?\s*[:\-\x{2013}]?\s*)"#, with: "",
                                   options: [.regularExpression, .caseInsensitive])
-            .replacingOccurrences(of: #"\\n|\\t"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\n|\t"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: " .:;!-–"))
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .:;!-\u{2013}"))
         guard result.count >= 3 else { return nil }
         if result.count > 60 { result = String(result.prefix(57)).trimmed + "…" }
         return result.prefix(1).uppercased() + result.dropFirst()
+    }
+
+    // MARK: - Settings
+
+    /// Top-level configuration variables and their values/meanings.
+    private static func settings(in lines: [String], language: ScriptLanguage) -> [HeaderRow] {
+        var items: [HeaderRow] = []
+        var seen = Set<String>()
+        let pattern = #"^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Z][A-Z0-9_]{2,})\s*=\s*["']?([^"'\s;`]+)?["']?\s*(?:#\s*(.+))?$"#
+
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmed
+            if language.lineCommentPrefixes.contains(where: { trimmed.hasPrefix($0) }) { continue }
+            guard let parts = line.firstMatch(pattern) else { continue }
+            let key = parts[1]
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            let value = parts[2].isEmpty ? "\"\"" : parts[2]
+            var meaning = parts[3].trimmed
+            if meaning.isEmpty {
+                if index > 0 {
+                    let prev = lines[index - 1].trimmed
+                    if let prefix = language.lineCommentPrefixes.first(where: { prev.hasPrefix($0) }) {
+                        let text = String(prev.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: " -#"))
+                        if !text.isEmpty { meaning = text }
+                    }
+                }
+            }
+            if meaning.isEmpty {
+                meaning = defaultSettingMeaning(for: key, value: value)
+            }
+            items.append(HeaderRow(key: key, value: "\(value)||||\(meaning)"))
+        }
+        return items
+    }
+
+    static func defaultSettingMeaning(for key: String, value: String) -> String {
+        switch key {
+        case "DEBUG": return value == "0" ? "Production mode" : "Debug mode"
+        case "NOTIFY": return value == "success" ? "Notify the user on success" : (value == "silent" ? "Silent mode" : humanise(value))
+        case "BLOCKING_PROCESS_ACTION":
+            return value == "tell_user" ? "Tell the user to quit a running app, then ask the app to quit" : humanise(value)
+        case "PROMPT_TIMEOUT": return value == "86400" ? "Wait up to 24 hours for an answer" : "Timeout in seconds"
+        case "LOGO": return value == "jamf" ? "Jamf icon in dialogs" : "\(value) icon in dialogs"
+        case "IGNORE_APP_STORE_APPS": return value == "no" ? "Leave App Store / VPP apps alone" : humanise(value)
+        case "INSTALL": return value == "force" ? "Reinstall even when the version matches" : humanise(value)
+        case "REOPEN": return value == "yes" ? "Reopen the app after install" : humanise(value)
+        case "LOGGING": return value == "INFO" ? "Normal log level" : (value == "DEBUG" ? "Verbose log level" : humanise(value))
+        default: return humanise(key)
+        }
     }
 
     // MARK: - Jamf parameters
@@ -127,7 +223,10 @@ enum ScriptAnalyzer {
         let reference = language == .python ? #"sys\.argv\[\s*(\d+)\s*\]"# : #"\$\{?(\d+)\}?"#
         var labels: [Int: String] = [:]
         for line in code {
-            for match in line.allMatches(reference) {
+            // In shell, `$6` inside single quotes is an awk or sed field, such as awk '{ print $6 }',
+            // not a Jamf parameter, so single-quoted text is ignored.
+            let searched = language.isShell ? line.replacingOccurrences(of: #"'[^']*'"#, with: "''", options: .regularExpression) : line
+            for match in searched.allMatches(reference) {
                 guard let number = Int(match[1]) else { continue }
                 // $1–$3 are only Jamf's when read at the top level; inside functions they are arguments.
                 let isTopLevelAssignment = line.firstMatch(#"^[A-Za-z_]\w*="#) != nil
@@ -267,7 +366,7 @@ enum ScriptAnalyzer {
             return clean(first.components(separatedBy: ". ").first ?? first)
         }
         if language == .python, index + 1 < lines.count,
-           let doc = lines[index + 1].firstMatch(#"^\s*[rR]?(?:\"\"\"|''')\s*(.+?)\s*(?:\"\"\"|''')?\s*$"#)?[1] {
+           let doc = lines[index + 1].firstMatch(#"^\s*[rR]?(?:"""|''')\s*(.+?)\s*(?:"""|''')?\s*$"#)?[1] {
             return clean(doc)
         }
         return nil
@@ -282,7 +381,7 @@ enum ScriptAnalyzer {
             #"\btee\s+(?:-a\s+)?["']?([^\s"';|&)]+)"#,
             #"\btouch\s+["']?([^\s"';|&)]+)"#,
             #"PlistBuddy\b.*?-c\s+["'](?:Set|Add|Delete|Merge)[^"']*["']\s+["']?([^\s"';|&)]+)"#,
-            #"\bplutil\s+-(?:replace|insert|remove|convert)\b.*\s["']?(/[^\s"';|&)]+)"#,
+            #"\bplutil\s+-(?:replace|insert|remove|convert)\b.*\s["']?(/[^"'\s;| &)]+)"#,
             #"\bopen\(\s*["']([^"']+)["']\s*,\s*["'][wax]"#,       // Python
             #"(?:Out-File|Set-Content|Add-Content)\b[^\n]*?["']([^"']+)["']"#,  // PowerShell
         ]
@@ -294,7 +393,7 @@ enum ScriptAnalyzer {
                 files.append(path)
             }
         }
-        for match in code.allMatches(#"\bdefaults\s+write\s+["']?([^\s"']+)"#) {
+        for match in code.allMatches(#"\bdefaults\s+write\s+["']?([^"'\s]+)"#) {
             let domain = resolve(match[1], variables)
             files.append(domain.hasPrefix("/") ? (domain.hasSuffix(".plist") ? domain : domain + ".plist")
                                                : "Preferences for \(domain) (defaults write)")
@@ -313,6 +412,40 @@ enum ScriptAnalyzer {
 
         var seen = Set<String>()
         return (files + actions).filter { seen.insert($0).inserted }.prefix(10).map { $0 }
+    }
+
+    /// The values an extension attribute can report. `<result>$result</result>` lists every value assigned
+    /// to `result`, and a command substitution is shown as "Output of a command".
+    private static func results(_ code: [String], variables: [String: [String]]) -> [String] {
+        var items: [String] = []
+        func add(_ item: String) {
+            if !item.isEmpty, !items.contains(item) { items.append(item) }
+        }
+        for line in code {
+            for match in line.allMatches(#"<result>(.*?)</result>"#) {
+                let trimmed = match[1].trimmed
+                if let name = trimmed.firstMatch(#"^\$\{?([A-Za-z_]\w*)\}?$"#)?[1], let values = variables[name] {
+                    values.forEach(add)
+                } else if trimmed.hasPrefix("`") || trimmed.hasPrefix("$(") {
+                    add("Output of a command")
+                } else {
+                    add(trimmed)
+                }
+            }
+        }
+        return items
+    }
+
+    /// Every value given to each variable, e.g. `result="Not Installed"` in each branch of an if.
+    private static func allAssignments(in code: [String]) -> [String: [String]] {
+        var values: [String: [String]] = [:]
+        for line in code {
+            guard let parts = line.firstMatch(#"^\s*(?:local\s+)?([A-Za-z_]\w*)=(?:"([^"]*)"|'([^']*)'|(\S+))\s*$"#) else { continue }
+            var value = [parts[2], parts[3], parts[4]].first { !$0.isEmpty } ?? ""
+            if value.hasPrefix("$(") || value.hasPrefix("`") { value = "Output of a command" }
+            if !(values[parts[1]] ?? []).contains(value) { values[parts[1], default: []].append(value) }
+        }
+        return values
     }
 
     // MARK: - Binaries

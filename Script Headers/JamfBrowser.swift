@@ -1,18 +1,24 @@
 import SwiftUI
 
-/// Which items the browser lists, by whether they already have a standard header.
+/// Which items the browser lists, by whether they already have a standard header
+/// or have been downloaded on this Mac.
 enum HeaderFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case updated = "Updated"
     case notUpdated = "Not Updated"
+    case downloaded = "Downloaded"
+    case notDownloaded = "Not Downloaded"
 
     var id: String { rawValue }
 
-    func includes(_ item: JamfItem) -> Bool {
+    /// `jamf` supplies the download dates, which are kept per instance on this Mac rather than on the item.
+    func includes(_ item: JamfItem, in jamf: JamfModel) -> Bool {
         switch self {
         case .all: true
         case .updated: item.status.hasHeader
         case .notUpdated: item.status == .noHeader
+        case .downloaded: jamf.lastDownloaded(item) != nil
+        case .notDownloaded: jamf.lastDownloaded(item) == nil
         }
     }
 }
@@ -129,7 +135,7 @@ struct JamfBrowser: View {
     private var filteredItems: [JamfItem] {
         // Extension attributes without a script can't have a header, so they aren't listed.
         let items = (kind == .script ? jamf.scripts : jamf.extensionAttributes)
-            .filter { $0.status != .notScript && filter.includes($0) }
+            .filter { $0.status != .notScript && filter.includes($0, in: jamf) }
         let query = searchText.trimmed
         guard !query.isEmpty else { return items }
         return items.filter { $0.name.localizedStandardContains(query) || $0.category.localizedStandardContains(query) }
@@ -209,7 +215,8 @@ struct JamfBrowser: View {
                         }
                     }
                     Spacer()
-                    HeaderStatusBadge(status: item.status, pushed: jamf.lastPushed(item))
+                    HeaderStatusBadge(status: item.status, pushed: jamf.lastPushed(item),
+                                      downloaded: jamf.lastDownloaded(item))
                 }
                 .tag(item.id)
             }
@@ -222,6 +229,8 @@ struct JamfBrowser: View {
                 if filteredItems.isEmpty {
                     ContentUnavailableView("No \(kind.rawValue)", systemImage: "doc.text.magnifyingglass",
                                            description: Text(!searchText.isEmpty ? "Nothing matches your search."
+                                                             : filter == .notDownloaded ? "Every one has been downloaded."
+                                                             : filter == .notUpdated ? "Every one has a header."
                                                              : filter != .all ? "None are \(filter.rawValue.lowercased()) yet."
                                                              : "Jamf Pro didn't return any."))
                 }
@@ -279,6 +288,8 @@ private struct HeaderStatusBadge: View {
     let status: HeaderStatus
     /// When it was last updated from this Mac, if it was.
     let pushed: Date?
+    /// When its script and README were last downloaded on this Mac, if they were.
+    let downloaded: Date?
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 2) {
@@ -304,6 +315,13 @@ private struct HeaderStatusBadge: View {
             if let pushed {
                 Text("Pushed from this Mac \(pushed.formatted(date: .abbreviated, time: .shortened))")
                     .foregroundStyle(.secondary)
+            }
+            if let downloaded {
+                Text("Downloaded \(downloaded.formatted(date: .abbreviated, time: .shortened))")
+                    .foregroundStyle(.secondary)
+            } else if status != .notScript {
+                Text("Not downloaded")
+                    .foregroundStyle(.tertiary)
             }
         }
         .font(.caption)

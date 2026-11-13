@@ -1,6 +1,6 @@
 import Foundation
 
-/// The script languages Info Headers can write a header for.
+/// The script languages Script Scribe can write a header for.
 enum ScriptLanguage: String, CaseIterable, Identifiable {
     case bash = "Bash"
     case zsh = "zsh"
@@ -102,6 +102,26 @@ enum EADataType: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// What gets added to the script: the header, comments above the code, or both.
+enum OutputMode: String, CaseIterable, Identifiable {
+    case header = "Just Header"
+    case comments = "Just Comments"
+    case both = "Both"
+
+    var id: String { rawValue }
+
+    var includesHeader: Bool { self != .comments }
+    var includesComments: Bool { self != .header }
+
+    var help: String {
+        switch self {
+        case .header: "Adds or updates the header. The code below it isn't changed."
+        case .comments: "Adds comment lines above the code explaining what it does. The header and every line of code are left as they are."
+        case .both: "Adds or updates the header, and adds comment lines above the code. No line of code is changed."
+        }
+    }
+}
+
 /// How much the version moves when an existing header is updated.
 enum VersionBump: String, CaseIterable, Identifiable {
     case patch = "Patch"
@@ -128,6 +148,11 @@ enum VersionBump: String, CaseIterable, Identifiable {
         case .major: parts[0] += 1; parts[1] = 0; parts[2] = 0
         }
         return parts.prefix(3).map(String.init).joined(separator: ".")
+    }
+
+    /// Compares two MAJOR.MINOR.PATCH versions number by number, so 1.0.10 is above 1.0.9.
+    static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        lhs.compare(rhs, options: .numeric)
     }
 }
 
@@ -161,9 +186,23 @@ struct ScriptHeader {
     var sections: [HeaderRow] = []
     var requirements = ""
     var exitCodes: [HeaderRow] = []
+    /// Values an extension attribute can report; left out when empty.
+    var results: [String] = []
     /// Optional "provided as is" notice; left out when empty.
     var disclaimer = ""
     var changeLog: [ChangeLogEntry] = []
+    /// Labelled lines the house format has no field for, e.g. `Fork:`; kept as written under Last Edit.
+    var extraFields: [HeaderRow] = []
+    /// Free-standing notes such as `** Check permissions when packaging **`; kept under the fields.
+    var notes: [String] = []
+    /// `* Heading` blocks the house format doesn't own, e.g. a list of builds; kept line for line.
+    var customSections: [HeaderBlock] = []
+}
+
+/// A `* Title` block from an existing header, kept exactly as written.
+struct HeaderBlock: Equatable {
+    var title: String
+    var lines: [String]
 }
 
 enum HeaderDate {

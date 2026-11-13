@@ -1,32 +1,51 @@
 import Foundation
 
-/// Writes a `ScriptHeader` as a comment block in the house format, about 80 columns wide.
+/// Writes a `ScriptHeader` in the house format: labelled `Name:` fields between dashed rulers, then
+/// `* Parameters`, `* Sections`, `* Exit Codes` and `* Change Log` as Markdown tables. Shell scripts
+/// wrap it in a `: <<'HEADER'` heredoc so the text needs no comment markers and the shell skips it.
 enum HeaderRenderer {
     static let lineWidth = 80
-    /// Width of the label column, e.g. "Requirements" or "Script Name ".
-    private static let labelWidth = 12
+
+    /// The heredoc delimiter that wraps shell headers: `: <<'HEADER'` … `HEADER`.
+    static let heredocDelimiter = "HEADER"
+
+    /// Width of the dashed rulers around the fields.
+    private static let rulerWidth = 80
 
     /// The full script: preamble, new header, kept directives, then the code.
     static func apply(_ header: ScriptHeader, to split: ScriptSplit, language: ScriptLanguage) -> String {
-        var lines = split.preamble
-        lines += commentBlock(header, language: language)
+        var lines = leadingLines(header, to: split, language: language)
         lines.append("")
-        lines += split.directives
+        // Shell directives go above the header so they apply to the whole file.
+        if !language.isShell { lines += split.directives }
         var result = lines.joined(separator: "\n")
         if !split.body.isEmpty { result += "\n" + split.body }
         if !result.hasSuffix("\n") { result += "\n" }
         return result
     }
 
-    /// The header with this language's comment markers.
+    /// Everything from line 1 to the end of the header block.
+    static func leadingLines(_ header: ScriptHeader, to split: ScriptSplit, language: ScriptLanguage) -> [String] {
+        var lines = split.preamble
+        if language.isShell, !split.directives.isEmpty {
+            lines += split.directives
+            lines.append("")
+        }
+        return lines + commentBlock(header, language: language)
+    }
+
+    /// The header wrapped for this language.
     static func commentBlock(_ header: ScriptHeader, language: ScriptLanguage) -> [String] {
         switch language {
         case .bash, .zsh, .sh:
-            return content(header, width: lineWidth - 2).map { $0.isEmpty ? "#" : "# " + $0 }
+            // A quoted delimiter stops the shell expanding `$4` or backticks inside the header.
+            // A line that is exactly the delimiter would end the heredoc early, so it is indented.
+            let body = content(header, width: lineWidth).map { $0 == heredocDelimiter ? " " + $0 : $0 }
+            return [": <<'\(heredocDelimiter)'", ""] + body + ["", heredocDelimiter]
         case .python:
-            return ["\"\"\""] + content(header, width: lineWidth - 2) + ["\"\"\""]
+            return ["\"\"\""] + content(header, width: lineWidth) + ["\"\"\""]
         case .appleScript:
-            return ["(*"] + content(header, width: lineWidth - 2) + ["*)"]
+            return ["(*"] + content(header, width: lineWidth) + ["*)"]
         case .javaScript:
             return ["/**"] + content(header, width: lineWidth - 3).map { $0.isEmpty ? " *" : " * " + $0 } + [" */"]
         case .powerShell:
@@ -45,111 +64,145 @@ enum HeaderRenderer {
         }
     }
 
-    /// The header text without comment markers.
-    static func content(_ header: ScriptHeader, width: Int) -> [String] {
-        let ruler = String(repeating: "=", count: width)
-        var lines = [ruler]
-        lines += field("Script Name", header.scriptName, width: width)
+    /// The header text without comment markers: a ruled block of fields, then `* Heading` Markdown tables.
+    ///
+    ///     --------------------------------------------------------------------
+    ///     Name:           install_chrome.sh
+    ///     Description:    Installs Google Chrome.
+    ///     --------------------------------------------------------------------
+    ///
+    ///     * Exit Codes
+    ///     | Code | Meaning          |
+    ///     | :--- | :---             |
+    ///     | 1    | Download failed  |
+    static func content(_ header: ScriptHeader, width: Int, includeOuterRulers: Bool = true) -> [String] {
+        let ruler = String(repeating: "-", count: min(rulerWidth, width))
+        var lines: [String] = []
+        if includeOuterRulers { lines.append(ruler) }
+        // Fields sit in spaced groups: name and description, author and version, then the dates.
+        lines += field("Name", header.scriptName, width: width)
         lines += field("Description", header.description, width: width)
         lines.append("")
         lines += field("Author", header.author, width: width)
         lines += field("Version", header.version, width: width)
+        lines.append("")
         lines += field("Created", header.created, width: width)
-        lines += field("Updated", header.updated, width: width)
-
-        var deployment: [String] = []
-        if !header.output.trimmed.isEmpty { deployment += field("Output", header.output, width: width) }
-        deployment += field("Deployment", header.deployment, width: width)
-        if !header.parameters.isEmpty { deployment += rows("Parameters", header.parameters, width: width) }
+        lines += field("Last Edit", header.updated, width: width)
+        for extra in header.extraFields {
+            lines += field(extra.key, extra.value, width: width)
+        }
+        if !header.output.trimmed.isEmpty {
+            lines.append("")
+            lines += field("Output", header.output, width: width)
+        }
         lines.append("")
-        lines += deployment
+        lines += field("Deployment", header.deployment, width: width)
+        if !header.requirements.trimmed.isEmpty {
+            lines.append("")
+            lines += field("Requirements", header.requirements, width: width)
+        }
+        if includeOuterRulers { lines.append(ruler) }
+        if !header.notes.isEmpty {
+            lines.append("")
+            lines += header.notes
+        }
 
+        /// A `* Title` heading with its table or text directly under it; a blank line would end the section.
+        func section(_ title: String, _ block: [String]) {
+            lines.append("")
+            lines.append("* " + title)
+            lines += block
+        }
+        // The script's own blocks, such as a list of builds, come first and are kept exactly as written.
+        for block in header.customSections {
+            section(block.title, block.lines)
+        }
+        if !header.parameters.isEmpty {
+            section("Parameters", table(["Parameter", "Description"], header.parameters.map { [$0.key, $0.value] }, width: width))
+        }
         if !header.sections.isEmpty {
-            lines.append("")
-            lines += rows("Sections", header.sections, width: width)
+            section("Sections", table(["Section", "Description"], header.sections.map { [$0.key, $0.value] }, width: width))
         }
-        lines.append("")
-        lines += field("Requirements", header.requirements, width: width)
-        lines.append("")
-        lines += rows("Exit Codes", header.exitCodes, width: width)
-        lines.append("")
+        if !header.exitCodes.isEmpty {
+            section("Exit Codes", table(["Code", "Meaning"], header.exitCodes.map { [$0.key, $0.value] }, width: width))
+        }
+        if !header.results.isEmpty {
+            section("Results", table(["Result"], header.results.map { [$0] }, width: width))
+        }
         if !header.disclaimer.trimmed.isEmpty {
-            lines += field("Disclaimer", header.disclaimer, width: width)
-            lines.append("")
+            section("Disclaimer", wrap(header.disclaimer, width: width))
         }
-        lines += changeLog(header.changeLog, width: width)
-        lines.append(ruler)
+        if !header.changeLog.isEmpty {
+            let hasAuthor = header.changeLog.contains { !$0.author.trimmed.isEmpty }
+            let columns = hasAuthor ? ["Version", "Date", "Author", "Change"] : ["Version", "Date", "Change"]
+            let rows = header.changeLog.map { entry in
+                hasAuthor ? [entry.version, entry.date, entry.author, entry.note] : [entry.version, entry.date, entry.note]
+            }
+            section("Change Log", table(columns, rows, width: width))
+        }
         return lines.map { $0.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression) }
     }
 
     // MARK: - Pieces
 
-    private static func prefix(_ label: String) -> String {
-        label.padding(toLength: labelWidth, withPad: " ", startingAt: 0) + ": "
-    }
+    /// Width of the label column including the colon, e.g. "Description:    ".
+    private static let labelWidth = 16
 
-    /// `Label       : value`, wrapped with continuation lines under the value column.
+    /// `Label:          value`, wrapped with continuation lines under the value column.
     private static func field(_ label: String, _ value: String, width: Int) -> [String] {
-        let first = prefix(label)
-        let indent = String(repeating: " ", count: first.count)
-        return wrap(value, width: width - first.count).enumerated().map { ($0 == 0 ? first : indent) + $1 }
-    }
-
-    /// Aligned `key - meaning` rows under one label.
-    private static func rows(_ label: String, _ rows: [HeaderRow], width: Int) -> [String] {
-        let first = prefix(label)
-        let indent = String(repeating: " ", count: first.count)
-        // Only rows with a meaning need aligning, and the column is capped so one long name
-        // doesn't squeeze every meaning into a narrow strip at the right.
-        let maxKeyWidth = 22
-        let keyWidth = rows.filter { !$0.value.trimmed.isEmpty }.map { $0.key.trimmed.count }
-            .filter { $0 <= maxKeyWidth }.max() ?? 0
-        let valueIndent = String(repeating: " ", count: keyWidth + 3)
-        let valueWidth = width - first.count - valueIndent.count
-        var lines: [String] = []
-        for row in rows {
-            let name = row.key.trimmed
-            let value = row.value.trimmed
-            guard !value.isEmpty else {
-                lines.append(name)
-                continue
-            }
-            let key = name.padding(toLength: max(keyWidth, name.count), withPad: " ", startingAt: 0) + " - "
-            // A name longer than the column starts its meaning further right on the first line only.
-            let firstWidth = width - first.count - key.count
-            let firstLine = wrap(value, width: max(firstWidth, 20)).first ?? ""
-            let rest = value.split(separator: " ", omittingEmptySubsequences: true)
-                .dropFirst(firstLine.split(separator: " ").count)
-                .joined(separator: " ")
-            lines.append(key + firstLine)
-            if !rest.isEmpty { lines += wrap(rest, width: valueWidth).map { valueIndent + $0 } }
+        guard !value.trimmed.isEmpty else { return [] }
+        let prefix = (label + ":").padding(toLength: labelWidth, withPad: " ", startingAt: 0)
+        let indent = String(repeating: " ", count: labelWidth)
+        let available = max(20, width - labelWidth)
+        let wrapped = wrap(value, width: available)
+        return wrapped.enumerated().map { index, line in
+            (index == 0 ? prefix : indent) + line
         }
-        return lines.enumerated().map { ($0 == 0 ? first : indent) + $1 }
     }
 
-    /// `Change Log  :` followed by aligned version, date, author and note columns.
-    private static func changeLog(_ entries: [ChangeLogEntry], width: Int) -> [String] {
-        let versionWidth = entries.map(\.version.count).max() ?? 0
-        let authorWidth = entries.map(\.author.count).max() ?? 0
-        var lines = [prefix("Change Log").trimmed]
-        for entry in entries {
-            var start = "  " + entry.version.padding(toLength: versionWidth, withPad: " ", startingAt: 0)
-                + "  " + entry.date
-            if authorWidth > 0 { start += "  " + entry.author.padding(toLength: authorWidth, withPad: " ", startingAt: 0) }
-            start += "  "
-            let indent = String(repeating: " ", count: start.count)
-            lines += wrap(entry.note, width: width - start.count).enumerated().map { ($0 == 0 ? start : indent) + $1 }
+    /// An aligned Markdown table with a `| :--- |` row under the titles. A long last cell is wrapped onto
+    /// extra rows with empty leading cells, which the parser joins back onto the row above.
+    private static func table(_ columns: [String], _ rows: [[String]], width: Int) -> [String] {
+        guard !rows.isEmpty else { return [] }
+        let rows = rows.map { row in row.map { $0.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: " ") } }
+        var lengths = columns.map { max($0.count, 4) }
+        for row in rows {
+            for (index, cell) in row.enumerated() where index < lengths.count - 1 {
+                lengths[index] = max(lengths[index], cell.count)
+            }
+        }
+        // "| " + cells joined by " | " + " |"
+        let overhead = 4 + (columns.count - 1) * 3
+        let others = lengths.dropLast().reduce(0, +)
+        let longest = rows.map { $0.last?.count ?? 0 }.max() ?? 0
+        lengths[lengths.count - 1] = max(lengths[lengths.count - 1], min(longest, max(15, width - overhead - others)))
+
+        func line(_ cells: [String]) -> String {
+            "| " + cells.enumerated().map { index, cell in
+                cell.padding(toLength: max(lengths[index], cell.count), withPad: " ", startingAt: 0)
+            }.joined(separator: " | ") + " |"
+        }
+
+        var lines = [line(columns), line(columns.map { _ in ":---" })]
+        for row in rows {
+            let leading = Array(row.dropLast())
+            let last = wrap(row.last ?? "", width: lengths[lengths.count - 1])
+            for (index, part) in (last.isEmpty ? [""] : last).enumerated() {
+                let lead = index == 0 ? leading : leading.map { _ in "" }
+                lines.append(line(lead + [part]))
+            }
         }
         return lines
     }
 
-    /// Word-wraps each line of `text` to `width`; existing line breaks are kept.
-    static func wrap(_ text: String, width: Int) -> [String] {
-        let width = max(width, 20)
+    /// Wraps `text` to lines of at most `width` columns, preserving paragraph breaks.
+    private static func wrap(_ text: String, width: Int) -> [String] {
         var lines: [String] = []
         for paragraph in text.components(separatedBy: "\n") {
+            let trimmed = paragraph.trimmed
+            guard !trimmed.isEmpty else { lines.append(""); continue }
             var current = ""
-            for word in paragraph.split(separator: " ", omittingEmptySubsequences: true) {
+            for word in trimmed.split(separator: " ") {
                 if current.isEmpty {
                     current = String(word)
                 } else if current.count + 1 + word.count <= width {
@@ -161,6 +214,6 @@ enum HeaderRenderer {
             }
             if !current.isEmpty { lines.append(current) }
         }
-        return lines.isEmpty ? [""] : lines
+        return lines
     }
 }

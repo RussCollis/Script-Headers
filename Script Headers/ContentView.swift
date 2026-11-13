@@ -11,7 +11,9 @@ struct ContentView: View {
                 if !library.documents.isEmpty {
                     Section("Open Scripts") {
                         ForEach(library.documents) { document in
-                            DocumentRow(document: document)
+                            DocumentRow(document: document, isSelected: library.selection == document.id) {
+                                library.close(document.id)
+                            }
                                 .tag(document.id)
                                 .contextMenu {
                                     Button("Close") { library.close(document.id) }
@@ -19,6 +21,9 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            .onDeleteCommand {
+                if let selection = library.selection { library.close(selection) }
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
             .scrollContentBackground(.hidden)
@@ -73,7 +78,7 @@ struct ContentView: View {
                         Button("Load from Jamf Pro…") { library.isBrowsingJamf = true }
                     }
                 }
-                .navigationTitle("Info Headers")
+                .navigationTitle("Script Scribe")
             }
         }
         .overlay {
@@ -100,7 +105,7 @@ struct ContentView: View {
                 library.open(record, from: instance)
             }
         }
-        .alert("Info Headers", isPresented: Binding(get: { library.errorMessage != nil },
+        .alert("Script Scribe", isPresented: Binding(get: { library.errorMessage != nil },
                                                     set: { if !$0 { library.errorMessage = nil } })) {
             Button("OK") { library.errorMessage = nil }
         } message: {
@@ -111,11 +116,32 @@ struct ContentView: View {
     }
 }
 
-/// A script in the sidebar, with a dot until its header has been saved.
+/// A script in the sidebar, with a dot until its header has been saved. A close button shows
+/// while the row is selected or the pointer is over it.
 private struct DocumentRow: View {
     let document: HeaderDocument
+    let isSelected: Bool
+    let close: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
+        HStack {
+            label
+            Spacer(minLength: 4)
+            Button(action: close) {
+                Image(systemName: "xmark.circle.fill")
+                    .imageScale(.large)
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(.plain)
+            .help("Close \(document.fileName)")
+            .accessibilityLabel("Close \(document.fileName)")
+            .opacity(isHovering || isSelected ? 1 : 0)
+        }
+        .onHover { isHovering = $0 }
+    }
+
+    private var label: some View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 Text(document.fileName)
@@ -156,7 +182,7 @@ struct SidebarHeader: View {
                 .frame(width: 110, height: 110)
                 .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
                 .accessibilityHidden(true)
-            Text("Info Headers")
+            Text("Script Scribe")
                 .font(.title3.bold())
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)

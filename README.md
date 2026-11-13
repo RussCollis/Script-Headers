@@ -1,10 +1,10 @@
-# Info Headers
+# Script Scribe
 
 [![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=russcollis&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/russcollis)
 
 A native macOS SwiftUI app for Jamf Pro admins that adds a standard header to any **Jamf Pro script** or **extension attribute**. It reads the code to fill in the header, so a reader can see what the script does, how it's deployed, what it needs and what has changed without reading the code.
 
-The current version is **1.0.36 (build 36)**
+The current version is **1.0.71 (build 71)**
 
 ## ✨ Features
 
@@ -45,7 +45,7 @@ The app icon is drawn by `tools/make-icon.swift`.
 
 ## ⚠️ Disclaimer
 
-Info Headers is provided as is, without warranty of any kind. It only changes the comment header, but always review the result and test scripts before deploying them. You're responsible for anything pushed to Jamf Pro.
+Script Scribe is provided as is, without warranty of any kind. It only changes the comment header, but always review the result and test scripts before deploying them. You're responsible for anything pushed to Jamf Pro.
 
 ## 📄 Licence
 

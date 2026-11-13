@@ -73,6 +73,24 @@ final class HeaderDocument: Identifiable {
     static let updateNote = "Updated header"
     var disclaimerText = UserDefaults.standard.string(forKey: "disclaimer") ?? HeaderDocument.standardDisclaimer
 
+    /// Whether the header, comments above the code, or both are added. Remembered for the next script.
+    var mode = OutputMode(rawValue: UserDefaults.standard.string(forKey: HeaderDocument.modeKey) ?? "") ?? .both {
+        didSet {
+            // Keep the suggested Change Log note in step with the mode, unless the user has typed their own.
+            if changeNote == Self.updateNote(for: oldValue) { changeNote = Self.updateNote(for: mode) }
+        }
+    }
+    static let modeKey = "outputMode"
+
+    /// The suggested Change Log note when an existing header is updated.
+    static func updateNote(for mode: OutputMode) -> String {
+        switch mode {
+        case .both: return "Updated header and added comments"
+        case .comments: return "Comments added (no code changed)"
+        case .header: return updateNote
+        }
+    }
+
     init(text: String, fileName: String, url: URL?) {
         self.url = url
         self.fileName = fileName
@@ -82,7 +100,7 @@ final class HeaderDocument: Identifiable {
         let split = ScriptSplit(text: text, language: language)
         let analysis = ScriptAnalyzer.analyse(split.body, language: language)
         self.split = split
-        parsed = HeaderParser.parse(split.headerLines)
+        parsed = HeaderParser.parse(split)
         self.analysis = analysis
         kind = analysis.reportsResult ? .extensionAttribute : .script
         seed()
@@ -103,7 +121,7 @@ final class HeaderDocument: Identifiable {
     func load(_ text: String) {
         originalText = text
         split = ScriptSplit(text: text, language: language)
-        parsed = HeaderParser.parse(split.headerLines)
+        parsed = HeaderParser.parse(split)
         analysis = ScriptAnalyzer.analyse(split.body, language: language)
         seed()
     }
@@ -133,6 +151,12 @@ final class HeaderDocument: Identifiable {
         /// Picks the existing meaning or the one read from the code, depending on the mode.
         func meaning(existing: String?, fromCode: String, isGeneric: Bool) -> String {
             guard let existing, !existing.trimmed.isEmpty else { return fromCode }
+            // When the code now finds more reasons and the existing wording is just one of them (as an
+            // earlier version of this app wrote it), the fuller list from the code is used.
+            if let cleaned = ScriptAnalyzer.clean(existing), fromCode.count > cleaned.count,
+               fromCode.localizedCaseInsensitiveContains(cleaned) {
+                return fromCode
+            }
             return keepsWording || isGeneric || fromCode.isEmpty ? existing : fromCode
         }
 
@@ -173,23 +197,30 @@ final class HeaderDocument: Identifiable {
     static let assumedVersion = "1.0.0"
     static let headerAddedNote = "Header added"
 
+    /// The Change Log note for a script that had no header.
+    var addedNote: String { mode == .both ? "Header and comments added" : Self.headerAddedNote }
+
     /// The version in the existing header, if there is one.
     var existingVersion: String? { parsed.version }
 
     /// True when the script already has a header in the house format, so this is an update.
     var hasHouseHeader: Bool { parsed.fields[.scriptName] != nil }
 
-    /// Adding or updating the header is a change, so the version is always bumped.
-    var version: String { bump.apply(to: existingVersion ?? Self.assumedVersion) }
+    /// Adding or updating the header is a change, so the version is bumped. Just Comments leaves the
+    /// header alone, so the version stays as it is.
+    var version: String {
+        mode.includesHeader ? bump.apply(to: existingVersion ?? Self.assumedVersion) : existingVersion ?? ""
+    }
 
     /// The Change Log: earlier entries plus one for this change.
     var changeLog: [ChangeLogEntry] {
         var entries = parsed.changeLog.map { entry in
             var entry = entry
-            if entry.author.isEmpty { entry.author = Self.unknownAuthor }
+            // An entry with no author was written by the header's author, when the header names one.
+            if entry.author.isEmpty { entry.author = parsed.fields[.author].map(\.trimmed).flatMap { $0.isEmpty ? nil : $0 } ?? Self.unknownAuthor }
             return entry
         }
-        let note = hasHouseHeader ? changeNote.trimmed : Self.headerAddedNote
+        let note = hasHouseHeader ? changeNote.trimmed : addedNote
         entries.append(ChangeLogEntry(version: version, date: HeaderDate.today, author: updatedBy.trimmed, note: note))
         return entries
     }
@@ -250,20 +281,135 @@ final class HeaderDocument: Identifiable {
                      sections: sections.filter { !$0.key.trimmed.isEmpty },
                      requirements: text(for: .requirements),
                      exitCodes: exitCodes.filter { !$0.key.trimmed.isEmpty },
+                     results: kind == .extensionAttribute ? analysis.results : [],
                      disclaimer: includeDisclaimer ? disclaimerText.trimmed : "",
-                     changeLog: changeLog)
+                     changeLog: changeLog,
+                     extraFields: parsed.extraFields, notes: parsed.notes,
+                     customSections: parsed.customSections)
     }
 
-    var rendered: String { HeaderRenderer.apply(header, to: split, language: language) }
+    /// The script as it will be saved, with what was added marked for the preview.
+    struct Output {
+        var text: String
+        /// Lines from the top that make up the new header; 0 when the header isn't changed.
+        var headerLineCount: Int
+        /// Indexes of the comment lines added above the code.
+        var commentLines: Set<Int>
+    }
+
+    var output: Output {
+        let exitMeanings = Dictionary(exitCodes.map { ($0.key.trimmed, $0.value) }, uniquingKeysWith: { first, _ in first })
+        switch mode {
+        case .header:
+            return Output(text: HeaderRenderer.apply(header, to: split, language: language),
+                          headerLineCount: headerLineCount, commentLines: [])
+        case .comments:
+            // The original text, header and all, with comment lines added above the code.
+            let text = originalText.replacingOccurrences(of: "\r\n", with: "\n")
+            let result = ScriptCommenter.comment(text, language: language, exitMeanings: exitMeanings)
+            return Output(text: result.text, headerLineCount: 0, commentLines: result.addedLines)
+        case .both:
+            let headerLines = headerLineCount
+            let result = ScriptCommenter.comment(HeaderRenderer.apply(header, to: split, language: language),
+                                                 language: language, exitMeanings: exitMeanings,
+                                                 protectedLines: headerLines)
+            return Output(text: result.text, headerLineCount: headerLines, commentLines: result.addedLines)
+        }
+    }
+
+    var rendered: String { output.text }
 
     /// Line count of the new header, used to highlight it in the preview.
     var headerLineCount: Int {
-        split.preamble.count + HeaderRenderer.commentBlock(header, language: language).count
+        HeaderRenderer.leadingLines(header, to: split, language: language).count
+    }
+
+    /// What Save does, in words for the confirmation.
+    var saveSummary: String {
+        switch mode {
+        case .header: "The file is overwritten with version \(version). The code below the header isn't changed."
+        case .comments: "Comment lines are added above the code. The header and every line of code are left as they are."
+        case .both: "The file is overwritten with version \(version), with comment lines added above the code. No line of code is changed."
+        }
+    }
+
+    // MARK: - README
+
+    /// A Markdown README describing the script, built from the header fields.
+    var readme: String {
+        ReadmeRenderer.markdown(for: self)
+    }
+
+    /// How the script works, written by Apple Intelligence; nil until Write README has been used.
+    var readmeInsights: ReadmeInsights?
+    /// True while Apple Intelligence is writing the README.
+    private(set) var isWritingReadme = false
+
+    /// Asks Apple Intelligence to explain the script for the README. The facts in the README are unchanged.
+    func writeReadme() async throws {
+        if let reason = ReadmeWriter.unavailableReason {
+            throw NSError(domain: "ReadmeWriter", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
+        isWritingReadme = true
+        defer { isWritingReadme = false }
+        readmeInsights = try await ReadmeWriter.insights(for: self)
+    }
+
+    /// `install_chrome.sh` → `install_chrome README.md`.
+    var readmeFileName: String {
+        let base = (fileName as NSString).deletingPathExtension
+        return (base.isEmpty ? fileName : base) + " README.md"
+    }
+
+    /// Folder name for exporting the script and README bundle (e.g. "Installomator").
+    var exportFolderName: String {
+        let base = (fileName as NSString).deletingPathExtension
+        return base.isEmpty ? fileName : base
+    }
+
+    /// Jamf Pro Cloud web URL if opened from Jamf Pro or found in original text.
+    var jamfWebURL: URL? {
+        if let source = jamfSource, let url = source.webURL {
+            return url
+        }
+        if let match = originalText.firstMatch(#"https?://[^\s"'<>()]+(?:jamfcloud\.com|/view/settings/computer-management/)[^\s"'<>()]+"#) {
+            return URL(string: match[0])
+        }
+        return nil
+    }
+
+    /// Exports both the script and its Markdown README into a folder named after the script inside `parentDirectory`.
+    @discardableResult
+    func exportToFolder(in parentDirectory: URL) throws -> URL {
+        let folderURL = parentDirectory.appendingPathComponent(exportFolderName, isDirectory: true)
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: folderURL.path) {
+            try fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        }
+
+        // 1. Write the script file as plain text (`install_chrome.sh` → `install_chrome.txt`)
+        //    so it opens in any text editor and is safe to attach or share.
+        let scriptURL = folderURL.appendingPathComponent(exportFolderName).appendingPathExtension("txt")
+        try Self.write(rendered, to: scriptURL, makeExecutable: false)
+
+        // 2. Write the README file
+        let readmeURL = folderURL.appendingPathComponent("README.md")
+        try Data(readme.utf8).write(to: readmeURL, options: .atomic)
+
+        return folderURL
     }
 
     /// Fields the user should confirm before saving, as the skill asks.
     var checks: [String] {
         var items: [String] = []
+        if !mode.includesHeader {
+            // Only the code is touched, so the header's fields don't need checking.
+            if split.shebang == nil, language.isShell {
+                items.append("There's no shebang, so Jamf Pro runs this with /bin/sh. Script Scribe won't add one.")
+            }
+            items.append("Comments are written by fixed rules. Read them in the preview before saving.")
+            return items
+        }
         if url == nil, jamfSource == nil { items.append("The file name \"\(fileName)\" was guessed. Check Script Name.") }
         if descriptionText.trimmed.isEmpty { items.append("Add a description of what the script does and why.") }
         if !isOverridden(.requirements) { items.append("The minimum OS (\(minimumOS)) is assumed. Confirm it.") }
@@ -285,7 +431,7 @@ final class HeaderDocument: Identifiable {
         }
         if hasHouseHeader, changeNote.trimmed.isEmpty { items.append("Describe this change for the Change Log.") }
         if split.shebang == nil, language.isShell {
-            items.append("There's no shebang, so Jamf Pro runs this with /bin/sh. Info Headers won't add one.")
+            items.append("There's no shebang, so Jamf Pro runs this with /bin/sh. Script Scribe won't add one.")
         }
         items += privacyWarnings
         return items
@@ -321,6 +467,7 @@ final class HeaderDocument: Identifiable {
     /// The version in words for the window: "1.0.0 → 1.0.1" before saving, "1.0.1 · Saved" after.
     var versionSummary: String {
         if let savedVersion, isUpToDate { return "Version \(savedVersion) · Saved" }
+        if !mode.includesHeader { return "Version \(existingVersion ?? "none") · Comments only" }
         return "Version \(existingVersion ?? "\(Self.assumedVersion) (assumed)") → \(version)"
     }
 
@@ -359,6 +506,7 @@ final class HeaderDocument: Identifiable {
         UserDefaults.standard.set(updatedBy, forKey: "updatedBy")
         UserDefaults.standard.set(minimumOS, forKey: "minimumOS")
         UserDefaults.standard.set(includeDisclaimer, forKey: "includeDisclaimer")
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.modeKey)
         if includeDisclaimer { UserDefaults.standard.set(disclaimerText, forKey: "disclaimer") }
     }
 

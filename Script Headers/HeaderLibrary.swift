@@ -51,7 +51,7 @@ final class HeaderLibrary {
             selection = existing.id
             return
         }
-        let source = JamfSource(instanceID: instance.id, instanceName: instance.displayName, item: record.item)
+        let source = JamfSource(instanceID: instance.id, instanceName: instance.displayName, item: record.item, serverURL: instance.serverURL)
         let document = HeaderDocument(record: record, source: source)
         documents.append(document)
         selection = document.id

@@ -7,7 +7,7 @@ struct InfoHeadersApp: App {
     @State private var library = HeaderLibrary()
 
     var body: some Scene {
-        Window("Info Headers", id: "main") {
+        Window("Script Scribe", id: "main") {
             ContentView(library: library)
                 .frame(minWidth: 1050, minHeight: 680)
         }
@@ -15,7 +15,7 @@ struct InfoHeadersApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About Info Headers") {
+                Button("About Script Scribe") {
                     AboutPanel.show()
                 }
             }
@@ -33,7 +33,7 @@ struct InfoHeadersApp: App {
 
 /// The app's own disclaimer, shown in About and before anything is pushed to Jamf Pro.
 enum AppDisclaimer {
-    static let text = "Info Headers is provided as is, without warranty of any kind. It only changes the comment "
+    static let text = "Script Scribe is provided as is, without warranty of any kind. It only changes the comment "
         + "header, but always review the result and test scripts before deploying them. You're responsible "
         + "for anything pushed to Jamf Pro."
 }
