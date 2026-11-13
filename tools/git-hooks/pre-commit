@@ -1,0 +1,13 @@
+#!/bin/zsh
+#
+# Counts each commit as an iteration: bumps the version and build, and includes the change in the commit.
+# Enabled with: git config core.hooksPath tools/git-hooks
+#
+set -euo pipefail
+
+# Replayed commits during a rebase aren't new iterations.
+[[ "${GIT_REFLOG_ACTION:-}" == *rebase* ]] && exit 0
+
+ROOT=$(git rev-parse --show-toplevel)
+PROJECT_DIR="$ROOT" "$ROOT/tools/bump-build.sh"
+git add "$ROOT/Script Headers.xcodeproj/project.xcproj" "$ROOT/README.md"
