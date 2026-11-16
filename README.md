@@ -2,6 +2,8 @@
 
 [![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=russcollis&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://www.buymeacoffee.com/russcollis)
 
+If this app saved you time or gave you a foundation to work from, please consider buying me a coffee - cheers :)
+
 A native macOS SwiftUI app for Jamf Pro admins that adds a standard header to any **Jamf Pro script** or **extension attribute**. It reads the code to fill in the header, so a reader can see what the script does, how it's deployed, what it needs and what has changed without reading the code.
 
 The current version is **1.0.76 (build 76)**
