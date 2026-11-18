@@ -514,7 +514,8 @@ private struct CodeScanner {
             return
         }
         if language.isShell,
-           let delimiter = trimmed.firstMatch(#"<<-?\s*['"]?([A-Za-z_]\w*)['"]?\s*$"#)?[1] {
+           // Anywhere on the line, so `cat <<EOF > file` and `cat <<EOF | sort` are caught too.
+           let delimiter = trimmed.firstMatch(#"(?<![<\w])<<-?\s*(['"]?)([A-Za-z_]\w*)\1"#)?[2] {
             inHeredocDelimiter = delimiter
             isAtStatementStart = false
             return
@@ -543,6 +544,13 @@ private struct CodeScanner {
                 let rest = trimmed.dropFirst(triple.count)
                 if !rest.contains(triple) { inMultilineStringDelimiter = triple }
                 isAtStatementStart = inMultilineStringDelimiter == nil
+                return
+            }
+            // A triple-quoted string opened part-way along a line (`text = """`) that stays open:
+            // its lines are data, so no comment may go inside it.
+            for triple in ["\"\"\"", "'''"] where (trimmed.components(separatedBy: triple).count - 1) % 2 == 1 {
+                inMultilineStringDelimiter = triple
+                isAtStatementStart = false
                 return
             }
         }

@@ -319,6 +319,17 @@ final class HeaderDocument: Identifiable {
 
     var rendered: String { output.text }
 
+    /// The script as it will be written, once `ScriptIntegrity` has confirmed that every line of the
+    /// original code is still there, in order, however long the script is. Every path that writes or
+    /// sends the script (Save, Save As, Download, Copy, Update in Jamf Pro) goes through this, so a
+    /// header or comment rule that misreads a script can never cut code off.
+    func verifiedText() throws -> String {
+        let output = self.output
+        try ScriptIntegrity.verify(original: originalText, updated: output.text, language: language,
+                                   addedLines: mode == .comments ? output.commentLines : nil)
+        return output.text
+    }
+
     /// Line count of the new header, used to highlight it in the preview.
     var headerLineCount: Int {
         HeaderRenderer.leadingLines(header, to: split, language: language).count
@@ -381,6 +392,8 @@ final class HeaderDocument: Identifiable {
     /// Exports both the script and its Markdown README into a folder named after the script inside `parentDirectory`.
     @discardableResult
     func exportToFolder(in parentDirectory: URL) throws -> URL {
+        // Checked before the folder is made, so a refused script leaves nothing behind.
+        let script = try verifiedText()
         let folderURL = parentDirectory.appendingPathComponent(exportFolderName, isDirectory: true)
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: folderURL.path) {
@@ -390,7 +403,7 @@ final class HeaderDocument: Identifiable {
         // 1. Write the script file as plain text (`install_chrome.sh` → `install_chrome.txt`)
         //    so it opens in any text editor and is safe to attach or share.
         let scriptURL = folderURL.appendingPathComponent(exportFolderName).appendingPathExtension("txt")
-        try Self.write(rendered, to: scriptURL, makeExecutable: false)
+        try Self.write(script, to: scriptURL, makeExecutable: false)
 
         // 2. Write the README file
         let readmeURL = folderURL.appendingPathComponent("README.md")
@@ -488,7 +501,7 @@ final class HeaderDocument: Identifiable {
 
     /// Writes the script, then reloads it so the next change is counted from the saved version.
     private func commit(to url: URL, makeExecutable: Bool) throws {
-        let text = rendered
+        let text = try verifiedText()
         try Self.write(text, to: url, makeExecutable: makeExecutable)
         didSave(text)
     }

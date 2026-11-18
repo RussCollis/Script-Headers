@@ -97,9 +97,15 @@ struct DocumentView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(document.rendered, forType: .string)
-                show("Copied the script")
+                do {
+                    // Copy only a script that has passed the "no code lost" check.
+                    let text = try document.verifiedText()
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    show("Copied the script")
+                } catch {
+                    saveError = error.localizedDescription
+                }
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
@@ -114,8 +120,14 @@ struct DocumentView: View {
             .help("Save the script and its README.md together in a folder named after the script (defaults to Desktop)")
 
             Button {
-                exportKind = .script
-                isExporting = true
+                do {
+                    // Check first: the save panel writes the file itself, before `didSave(to:)` runs.
+                    _ = try document.verifiedText()
+                    exportKind = .script
+                    isExporting = true
+                } catch {
+                    saveError = error.localizedDescription
+                }
             } label: {
                 Label("Save As…", systemImage: "square.and.arrow.down.on.square")
             }
@@ -192,7 +204,14 @@ struct DocumentView: View {
     /// Sends the script with its new header back to Jamf Pro, then reads it back to check it.
     private func push() {
         guard let source = document.jamfSource else { return }
-        let text = document.rendered
+        let text: String
+        do {
+            // Nothing goes to Jamf Pro unless every line of the original code is still there.
+            text = try document.verifiedText()
+        } catch {
+            saveError = error.localizedDescription
+            return
+        }
         isPushing = true
         Task {
             defer { isPushing = false }

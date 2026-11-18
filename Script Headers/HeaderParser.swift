@@ -36,7 +36,7 @@ struct ScriptSplit {
         if language.isShell, let end = Self.takeHeredoc(lines, from: index, directives: &directives, into: &headerLines) {
             index = end
         } else if let block = language.blockComment, index < lines.count, lines[index].trimmed.hasPrefix(block.open) {
-            index = Self.takeBlock(lines, from: index, block: block, language: language, into: &headerLines)
+            index = Self.takeBlock(&lines, from: index, block: block, language: language, into: &headerLines)
         } else {
             var comments: [String] = []
             while true {
@@ -140,12 +140,16 @@ struct ScriptSplit {
     }
 
     /// Reads a block comment starting at `start` and returns the index of the line after it.
-    private static func takeBlock(_ lines: [String], from start: Int, block: (open: String, close: String),
+    /// Code written after the closing marker on the same line (e.g. `#> param(`) is never dropped: on
+    /// the closing line it's left in `lines` as the first line of the body.
+    private static func takeBlock(_ lines: inout [String], from start: Int, block: (open: String, close: String),
                                   language: ScriptLanguage, into result: inout [String]) -> Int {
         var first = lines[start].trimmed
         first.removeFirst(block.open.count)
         if language == .javaScript { first = String(first.drop { $0 == "*" }) }
         if let end = first.range(of: block.close) {
+            // `/* note */ code` on one line describes that code, not the script; leave it alone.
+            guard String(first[end.upperBound...]).trimmed.isEmpty else { return start }
             result = [String(first[..<end.lowerBound]).trimmed].filter { !$0.isEmpty }
             return start + 1
         }
@@ -157,6 +161,12 @@ struct ScriptSplit {
                 let before = String(line[..<end.lowerBound])
                 if !before.trimmed.isEmpty, before.trimmed != "*" { inner.append(strip(before, language)) }
                 result = inner
+                let after = String(line[end.upperBound...]).trimmed
+                if !after.isEmpty {
+                    // Keep the code that follows the marker as its own line, so it stays in the script.
+                    lines[index] = after
+                    return index
+                }
                 return index + 1
             }
             line = strip(line, language)
